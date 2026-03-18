@@ -1,0 +1,8 @@
+target/
+.git/
+.rules/
+.ask_user.md
+bin/
+*.md
+README*
+LICENSE*
