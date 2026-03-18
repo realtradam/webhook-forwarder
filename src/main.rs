@@ -92,19 +92,28 @@ async fn handle(
     let upstream_uri: Uri = format!("{}{}", base_url, upstream_path).parse()?;
     eprintln!("POST {} -> forwarding to {}", path, upstream_uri);
 
+    // Extract headers before consuming the request body
+    let headers = req.headers().clone();
+    let is_form = content_type_is_form_urlencoded(&headers);
+
     // Build upstream request preserving headers and body
     let mut builder = Request::builder()
         .method(Method::POST)
         .uri(&upstream_uri);
 
-    // Extract headers before consuming the request body
-    let headers = req.headers().clone();
-
-    // Copy headers (skip Host, it should match the upstream)
+    // Copy headers (skip Host; skip Content-Type and Content-Length when
+    // we are going to convert from form-urlencoded to JSON)
     for (name, value) in &headers {
-        if name != hyper::header::HOST {
-            builder = builder.header(name, value);
+        if name == hyper::header::HOST {
+            continue;
         }
+        if is_form
+            && (name == hyper::header::CONTENT_TYPE
+                || name == hyper::header::CONTENT_LENGTH)
+        {
+            continue;
+        }
+        builder = builder.header(name, value);
     }
 
     // Collect the incoming body
@@ -112,14 +121,18 @@ async fn handle(
 
     // If the body is application/x-www-form-urlencoded (GitHub default), extract the
     // "payload" field and convert to application/json so Dokploy can parse it.
-    let body_bytes = if content_type_is_form_urlencoded(&headers) {
+    let body_bytes = if is_form {
         match extract_json_from_form(&body_bytes) {
             Some(json_bytes) => {
                 eprintln!("POST {} -> converting form-urlencoded payload to JSON", path);
                 builder = builder.header(hyper::header::CONTENT_TYPE, "application/json");
                 json_bytes
             }
-            None => body_bytes,
+            None => {
+                // Not convertible; restore original headers
+                builder = builder.header(hyper::header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+                body_bytes
+            }
         }
     } else {
         body_bytes
