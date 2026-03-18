@@ -32,4 +32,13 @@ STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/foo/bar/baz")
 echo "POST /foo/bar/baz -> $STATUS (expect 404)"
 
 echo ""
+echo "=== Test 6: POST form-urlencoded payload should be converted to JSON ==="
+PAYLOAD=$(python3 -c "import urllib.parse; print(urllib.parse.urlencode({'payload': '{\"ref\":\"refs/heads/main\"}'}))") 
+RESP=$(curl -s -w "\n%{http_code}" -X POST "$BASE/test-token" -H "Content-Type: application/x-www-form-urlencoded" -H "X-GitHub-Event: push" -d "$PAYLOAD")
+STATUS=$(echo "$RESP" | tail -1)
+BODY=$(echo "$RESP" | head -n -1)
+echo "POST /test-token (form-urlencoded) -> $STATUS (expect 502 if Dokploy unreachable, or upstream status)"
+echo "Body: $BODY"
+
+echo ""
 echo "Done!"

@@ -7,6 +7,7 @@ use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode, Uri};
+use hyper::header::HeaderMap;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use tokio::net::TcpListener;
@@ -37,6 +38,27 @@ fn map_path(path: &str) -> Option<String> {
         return Some(format!("/api/deploy/{}", trimmed));
     }
 
+    None
+}
+
+/// Check if the Content-Type header indicates form-urlencoded data.
+fn content_type_is_form_urlencoded(headers: &HeaderMap) -> bool {
+    headers
+        .get(hyper::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.starts_with("application/x-www-form-urlencoded"))
+        .unwrap_or(false)
+}
+
+/// Extract JSON from a form-urlencoded body.
+/// GitHub sends webhooks as `payload=<url-encoded-json>` when the webhook
+/// content type is set to `application/x-www-form-urlencoded`.
+fn extract_json_from_form(body: &Bytes) -> Option<Bytes> {
+    for (key, value) in form_urlencoded::parse(body) {
+        if key == "payload" {
+            return Some(Bytes::from(value.into_owned()));
+        }
+    }
     None
 }
 
@@ -75,8 +97,11 @@ async fn handle(
         .method(Method::POST)
         .uri(&upstream_uri);
 
+    // Extract headers before consuming the request body
+    let headers = req.headers().clone();
+
     // Copy headers (skip Host, it should match the upstream)
-    for (name, value) in req.headers() {
+    for (name, value) in &headers {
         if name != hyper::header::HOST {
             builder = builder.header(name, value);
         }
@@ -84,6 +109,22 @@ async fn handle(
 
     // Collect the incoming body
     let body_bytes = req.into_body().collect().await?.to_bytes();
+
+    // If the body is application/x-www-form-urlencoded (GitHub default), extract the
+    // "payload" field and convert to application/json so Dokploy can parse it.
+    let body_bytes = if content_type_is_form_urlencoded(&headers) {
+        match extract_json_from_form(&body_bytes) {
+            Some(json_bytes) => {
+                eprintln!("POST {} -> converting form-urlencoded payload to JSON", path);
+                builder = builder.header(hyper::header::CONTENT_TYPE, "application/json");
+                json_bytes
+            }
+            None => body_bytes,
+        }
+    } else {
+        body_bytes
+    };
+
     let upstream_req = builder.body(Full::new(body_bytes))?;
 
     // Send to Dokploy
